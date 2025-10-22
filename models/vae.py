@@ -152,13 +152,20 @@ class VAE(nn.Module):
         self.shift_factor = shift_factor
     
     def encode(self, x):
-        return (self.sampler(self.encoder(x)) - self.shift_factor) / self.scale_factor
+        x_enc = self.encoder(x)
+        mean, logvar = x_enc.chunk(2, dim=1)
+        return (self.sampler(x_enc) - self.shift_factor) / self.scale_factor, mean, logvar
     
     def decode(self, z):
         return self.decoder((z * self.scale_factor) + self.shift_factor)
     
-    def forward(self, x):
-        return self.decode(self.encode(x))
+    def forward(self, x, return_mean_logvar: bool = False):
+        x_enc, mean, logvar = self.encode(x)
+        x_rec = self.decode(x_enc)
+        if return_mean_logvar:
+            return x_rec, mean, logvar
+        else:
+            return x_rec
 
 if __name__ == "__main__":
     vae_encoder = VAEEncoder(in_channels=3, base_channels=32, num_res_blocks=2, channel_mults=[1, 2, 4, 8], z_channels=16)
