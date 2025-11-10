@@ -23,25 +23,50 @@ def scale_shift(x, scale=None, shift=None):
     return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
 
 
+class LabelEmbedder(nn.Module):
+    def __init__(self, num_classes, num_channels):
+        super().__init__()
+        self.label_embedding = nn.Embedding(1 + num_classes, num_channels)
+    
+    def forward(self, labels):
+        # Assumption: 0 is for unconditional, other labels start at 1
+        return self.label_embedding(labels)
+
+
 class Patchify(nn.Module):
     def __init__(self, in_channels, num_channels, patch_size=(1, 1, 1)):
         super().__init__()
 
         self.patch_size = patch_size
-        self.p_f, self.p_h, self.p_w = patch_size
-        self.linear = nn.Linear(in_channels * self.p_f * self.p_h * self.p_w, num_channels)
+        self.pf, self.ph, self.pw = patch_size
+        self.linear = nn.Linear(in_channels * self.pf * self.ph * self.pw, num_channels)
 
-    def forward(self, x):
+    def forward(self, x, fhw):
         # shape: x [b, c, f, h, w]
+        f, h, w = fhw[0], fhw[1], fhw[2]
+        nf, nh, nw = f // self.pf, h // self.ph, w // self.pw
 
-        bs, c, f, h, w = x.shape
+        x_patched = rearrange(x, "b c (nf pf) (nh ph) (nw pw) -> b (nf nh nw) (c pf ph pw)", nf=nf, nh=nh, nw=nw)
+        x = self.linear(x_patched)
+        return x
 
-        n_f, n_h, n_w = f // self.p_f, h // self.p_h, w // self.p_w
 
-        x_patched = rearrange(x, "b c (n_f p_f) (n_h p_h) (n_w p_w) -> b (n_f n_h n_w) (c p_f p_h p_w)", n_f=n_f, n_h=n_h, n_w=n_w)
+class UnPatchify(nn.Module):
+    def __init__(self, out_channels, num_channels, patch_size=(1, 1, 1)):
+        super().__init__()
 
-        return self.linear(x_patched)
+        self.patch_size = patch_size
+        self.pf, self.ph, self.pw = patch_size
+        self.linear = nn.Linear(num_channels, out_channels * self.pf * self.ph * self.pw)
+        
+    def forward(self, x, fhw):
+        # shape of x [bs, seq_len, num_channels]
+        f, h, w = fhw[0], fhw[1], fhw[2]
+        nf, nh, nw = f // self.pf, h // self.ph, w // self.pw
 
+        x = self.linear(x)
+        x = rearrange(x, "b (nf nh nw) (c pf ph pw) -> b c (nf pf) (nh ph) (nw pw)", nf=nf, nh=nh, nw=nw, pf=self.pf, ph=self.ph, pw=self.pw)
+        return x
 
 
 class MHSA(nn.Module):
@@ -86,13 +111,18 @@ class MHSA(nn.Module):
 
 
 class Mlp(nn.Module):
-    def __init__(self, num_channels):
+    # Saw this one from the code - https://github.com/facebookresearch/DiT/blob/main/models.py#L112
+    # and https://github.com/huggingface/pytorch-image-models/blob/main/timm/layers/mlp.py#L14-L54
+    def __init__(self, num_channels, mlp_channels):
         super().__init__()
         self.num_channels = num_channels
-        self.linear = nn.Linear(num_channels, num_channels)
+        
+        self.fc1 = nn.Linear(num_channels, mlp_channels)
+        self.act1 = nn.GELU(approximate="tanh")
+        self.fc2 = nn.Linear(mlp_channels, num_channels)
     
     def forward(self, x):
-        return self.linear(x)
+        return self.fc2(self.act1(self.fc1(x)))
 
 
 class DiTBlock(nn.Module):
@@ -126,40 +156,85 @@ class DiTBlock(nn.Module):
         return x
 
 
+class FinalLayer(nn.Module):
+    def __init__(self, num_channels):
+        super().__init__()
+
+        self.norm = nn.LayerNorm(num_channels, elementwise_affine=False)
+        self.adaLN_mlp = nn.Linear(num_channels, 2 * num_channels)
+        self.linear = nn.Linear(num_channels, num_channels)
+    
+    def forward(self, x, cond):
+        scale, shift = self.adaLN_mlp(cond).chunk(2, dim=-1)
+        return self.linear(scale_shift(self.norm(x), scale=scale, shift=shift))
+
+
 
 class DiT(nn.Module):
-    def __init__(self, num_channels, depth, num_heads):
+    def __init__(
+        self,
+        in_channels,
+        num_channels,
+        depth,
+        num_heads,
+        patch_size,
+
+        num_classes = 0
+    ):
         super().__init__()
+
+        self.out_channels = self.in_channels = in_channels
+        self.num_channels = num_channels
+        self.num_classes = num_classes
+
+        self.time_embedder = None
+        if self.num_classes > 0:
+            self.label_embedder = LabelEmbedder(num_classes, num_channels)
         
-
+        self.patchify = Patchify(in_channels, num_channels, patch_size)
         self.dit_blocks = nn.ModuleList([DiTBlock(num_channels, num_heads) for _ in range(depth)])
-        self.final_layer = nn.Linear(num_channels, num_channels) # TBA
+        self.final_layer = FinalLayer(num_channels)
+        self.unpatchify = UnPatchify(self.out_channels, num_channels, patch_size=patch_size)
 
-        return
-    
-
-
-    def forward(self, x, conds):
+    def forward(self, x, t, conds):
         # shapes
-        # x [bs, f, c, h, w]
+        # x [bs, c, f, h, w]
+        # conds will contain condition like t, label, etc.
 
-        x = self.patchify(x) # shape [bs, seq_len, num_channels]
+        b, c, f, h, w = x.shape
+        fhw = [f, h, w]
+
+        if self.num_classes > 0:
+            # Assumption: labels are shifted by 1 such that label 0 represents unconditional
+            label = conds.get("label") if "label" in conds else torch.zeros(b, 1)
+            label_embedding = self.label_embedder(label).squeeze(1)
+        else:
+            label_embedding = torch.zeros(b, self.num_channels)
+
+        conditional_embedding = label_embedding
+
+        x = self.patchify(x, fhw) # shape [bs, seq_len, num_channels]
 
         for block in self.dit_blocks:
-            x = block(x)
-        
-        x = self.final_layer(x)
-
-        x = self.unpatchify(x) # TBA
+            x = block(x, conditional_embedding)
+        x = self.final_layer(x, conditional_embedding)
+        x = self.unpatchify(x, fhw)
 
         return x
 
 
-def test_patchify(bs, c, f, h, w, num_channels):
+## Some sanity checks
+
+def test_patchify_unpatchify(bs, c, f, h, w, num_channels):
     patchify = Patchify(c, num_channels, patch_size=(1, 2, 2))
     x = torch.randn(bs, c, f, h, w)
-    x_patched = patchify(x)
-    print(f"{x.shape=}, {x_patched.shape=}")
+    fhw = x.shape[2:]
+    x_patched = patchify(x, fhw)
+
+    unpatchify = UnPatchify(c, num_channels, patch_size=(1, 2, 2))
+    x_out = unpatchify(x_patched, fhw)
+
+    assert x.shape == x_out.shape
 
 
 def test_mhsa(bs, seq_len, num_channels, num_heads):
@@ -178,14 +253,24 @@ def test_dit_block(bs, seq_len, num_channels, num_heads):
     assert out.shape == x.shape, f"Output shape {out.shape} does not match input shape {x.shape}"
 
 
+def test_dit(bs, c, f, h, w, num_channels, depth, num_heads, num_classes=10, patch_size=(1, 2, 2)):
+    dit = DiT(c, num_channels, depth, num_heads, patch_size, num_classes)
+    x = torch.randn(bs, c, f, h, w)
+    conds = {
+        "label": torch.zeros(bs, 1, dtype=torch.long)
+    }
+    t = torch.zeros(bs, 1)
+    out = dit(x, t, conds)
+    assert out.shape == x.shape, f"Output shape {out.shape} does not match input shape {x.shape}"
 
 if __name__ == '__main__':
     bs, c, f, h, w = 3, 16, 8, 32, 32
     num_channels = 32
-    test_patchify(bs, c, f, h, w, num_channels)
+    test_patchify_unpatchify(bs, c, f, h, w, num_channels)
 
     bs, seq_len, num_channels, num_heads = 3, 64, 32, 4
 
     test_mhsa(bs, seq_len, num_channels, num_heads)
     test_dit_block(bs, seq_len, num_channels, num_heads)
-    pass
+    
+    test_dit(bs, c, f, h, w, num_channels, 8, num_heads)
