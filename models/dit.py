@@ -23,6 +23,37 @@ def scale_shift(x, scale=None, shift=None):
     return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
 
 
+def sincos_embedding_1d(t, half_dim):
+    # Formula: PE_(pos,2i) = sin(pos/10000^(2i/d_model))
+    #          PE_(pos,2i+1) = cos(pos/10000^(2i/d_model))
+    # where i goes from 0 to half_dim-1
+    if t.ndim == 1:
+        t = t.unsqueeze(1) # [b, 1]
+    b = t.shape[0]
+    freqs = (10000 ** ((2. * torch.arange(0, half_dim)) / (2 * half_dim)))
+    pe_sin = torch.sin(t / freqs)
+    pe_cos = torch.cos(t / freqs)
+
+    pe = torch.stack([pe_sin, pe_cos], dim=-1).reshape(b, 2 * half_dim)
+
+    return pe
+
+
+class TimeEmbedder(nn.Module):
+    def __init__(self, t_dim, num_channels):
+        super().__init__()
+        self.t_dim = t_dim
+        self.proj = nn.Sequential(
+            nn.Linear(t_dim, num_channels),
+            nn.SiLU(),
+            nn.Linear(num_channels, num_channels),
+        )
+    
+    def forward(self, t):
+        t_emb = sincos_embedding_1d(t, self.t_dim // 2)
+        return self.proj(t_emb)
+
+
 class LabelEmbedder(nn.Module):
     def __init__(self, num_classes, num_channels):
         super().__init__()
@@ -126,13 +157,15 @@ class Mlp(nn.Module):
 
 
 class DiTBlock(nn.Module):
-    def __init__(self, num_channels, num_heads):
+    def __init__(self, num_channels, num_heads, mlp_ratio):
         super().__init__()
 
         self.mhsa_norm = nn.LayerNorm(num_channels, elementwise_affine=False)
         self.mhsa = MHSA(num_channels, num_heads)
         self.mlp_norm = nn.LayerNorm(num_channels, elementwise_affine=False)
-        self.mlp = Mlp(num_channels)
+
+        mlp_channels = int(num_channels * mlp_ratio)
+        self.mlp = Mlp(num_channels, mlp_channels)
 
         self.adaLN_mlp = nn.Linear(num_channels, 6 * num_channels) # can make it more complex
 
@@ -169,7 +202,6 @@ class FinalLayer(nn.Module):
         return self.linear(scale_shift(self.norm(x), scale=scale, shift=shift))
 
 
-
 class DiT(nn.Module):
     def __init__(
         self,
@@ -179,6 +211,9 @@ class DiT(nn.Module):
         num_heads,
         patch_size,
 
+        mlp_ratio = 4.0,
+
+        t_dim = 256,
         num_classes = 0
     ):
         super().__init__()
@@ -187,12 +222,12 @@ class DiT(nn.Module):
         self.num_channels = num_channels
         self.num_classes = num_classes
 
-        self.time_embedder = None
+        self.time_embedder = TimeEmbedder(t_dim, num_channels)
         if self.num_classes > 0:
             self.label_embedder = LabelEmbedder(num_classes, num_channels)
         
         self.patchify = Patchify(in_channels, num_channels, patch_size)
-        self.dit_blocks = nn.ModuleList([DiTBlock(num_channels, num_heads) for _ in range(depth)])
+        self.dit_blocks = nn.ModuleList([DiTBlock(num_channels, num_heads, mlp_ratio) for _ in range(depth)])
         self.final_layer = FinalLayer(num_channels)
         self.unpatchify = UnPatchify(self.out_channels, num_channels, patch_size=patch_size)
 
@@ -204,14 +239,12 @@ class DiT(nn.Module):
         b, c, f, h, w = x.shape
         fhw = [f, h, w]
 
+        conditional_embedding = self.time_embedder(t)
         if self.num_classes > 0:
             # Assumption: labels are shifted by 1 such that label 0 represents unconditional
             label = conds.get("label") if "label" in conds else torch.zeros(b, 1)
             label_embedding = self.label_embedder(label).squeeze(1)
-        else:
-            label_embedding = torch.zeros(b, self.num_channels)
-
-        conditional_embedding = label_embedding
+            conditional_embedding += label_embedding
 
         x = self.patchify(x, fhw) # shape [bs, seq_len, num_channels]
 
@@ -224,6 +257,11 @@ class DiT(nn.Module):
 
 
 ## Some sanity checks
+def test_sincos_embedding_1d():
+    t = torch.randn(3)
+    emb = sincos_embedding_1d(t, 128)
+    print(emb.shape)
+
 
 def test_patchify_unpatchify(bs, c, f, h, w, num_channels):
     patchify = Patchify(c, num_channels, patch_size=(1, 2, 2))
@@ -245,7 +283,7 @@ def test_mhsa(bs, seq_len, num_channels, num_heads):
 
 
 def test_dit_block(bs, seq_len, num_channels, num_heads):
-    block = DiTBlock(num_channels, num_heads)
+    block = DiTBlock(num_channels, num_heads, mlp_ratio=4.0)
     x = torch.randn(bs, seq_len, num_channels)
     cond = torch.randn(bs, num_channels)
 
@@ -254,7 +292,7 @@ def test_dit_block(bs, seq_len, num_channels, num_heads):
 
 
 def test_dit(bs, c, f, h, w, num_channels, depth, num_heads, num_classes=10, patch_size=(1, 2, 2)):
-    dit = DiT(c, num_channels, depth, num_heads, patch_size, num_classes)
+    dit = DiT(c, num_channels, depth, num_heads, patch_size, num_classes=num_classes)
     x = torch.randn(bs, c, f, h, w)
     conds = {
         "label": torch.zeros(bs, 1, dtype=torch.long)
@@ -264,6 +302,8 @@ def test_dit(bs, c, f, h, w, num_channels, depth, num_heads, num_classes=10, pat
     assert out.shape == x.shape, f"Output shape {out.shape} does not match input shape {x.shape}"
 
 if __name__ == '__main__':
+    test_sincos_embedding_1d()
+
     bs, c, f, h, w = 3, 16, 8, 32, 32
     num_channels = 32
     test_patchify_unpatchify(bs, c, f, h, w, num_channels)
