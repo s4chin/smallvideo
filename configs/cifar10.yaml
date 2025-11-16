@@ -1,0 +1,20 @@
+trainer:
+  target: trainers.ldm_trainer.LDMTrainer
+  batch_size: 16
+  num_workers: 2
+  learning_rate: 1e-4
+  num_iters: 15
+  val_every: 10
+  num_val_iters: 5
+dit:
+  in_channels: 3
+  num_channels: 32
+  depth: 8
+  num_heads: 4
+  patch_size:
+    - 1
+    - 1
+    - 1
+  mlp_ratio: 4.0
+  t_dim: 256
+  num_classes: 10

@@ -25,13 +25,24 @@ class LatentDiffusionModel(nn.Module):
         self.vae = vae
 
 
-    def prep_data(self, batch):
+    def prep_data(self, batch, p_drop_cond=0.):
         # timestep sample, vae encode/decode, etc.
         batch["t"] = self.scheduler.get_timestep(batch["x"].shape[0])
+        conds = batch.get("label", None)
+        if conds is not None:
+            if conds.ndim == 1:
+                conds = conds.reshape(-1, 1)
+            conds = 1. + conds
+            cond_drop_mask = torch.rand_like(conds) < p_drop_cond
+            conds = torch.where(cond_drop_mask, torch.zeros_like(conds), conds)
+            batch["label"] = conds.to(dtype=torch.long)
         return batch
 
 
-    def compute_loss(self, batch, noise, prediction):
+    def compute_loss(self, batch, is_train=False):
+        p_drop_cond = 0.1 if is_train else 0.0
+        batch = self.prep_data(batch, p_drop_cond=p_drop_cond)
+        prediction, noise = self.forward(batch, is_train=is_train)
         x = batch["x"]
         target = x - noise
 
@@ -41,21 +52,15 @@ class LatentDiffusionModel(nn.Module):
     def forward(self, batch, is_train=False):
         t = batch["t"]
         x = batch["x"]
-        conds = {}
+        conds = {
+            "label": batch["label"]
+        }
 
         noise = torch.randn_like(x)
         x_t = self.scheduler.add_noise(x, t, noise)
 
         prediction = self.dit(x_t, t, conds)
         return prediction, noise
-    
-    def fwd_bwd_one_step(self, batch):
-        batch = self.prep_data(batch)
-        prediction, noise = self.forward(batch, is_train=True)
-        loss = self.compute_loss(batch=batch, noise=noise, prediction=prediction)
-        loss.backward()
-        return loss.item()
-
 
 
 if __name__ == "__main__":

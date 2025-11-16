@@ -9,6 +9,7 @@ description = ""
 requires-python = ">=3.8"
 dependencies = [
     "einops>=0.8.1",
+    "omegaconf>=2.3.0",
     "torch>=2.5.1",
     "torchvision>=0.20.1",
 ]
