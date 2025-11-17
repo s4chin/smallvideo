@@ -4,6 +4,7 @@ import torchvision
 import torchvision.transforms as transforms
 
 from models import DiT, LatentDiffusionModel
+from PIL import Image
 
 transform = transforms.Compose([
     transforms.ToTensor(),
@@ -49,6 +50,7 @@ class LDMTrainer:
         for step, data in enumerate(self.train_loader):
             if step > 0 and (step + 1) % val_every == 0:
                 self.ldm.eval()
+                val_losses = []
                 for val_step, val_data in enumerate(self.val_loader):
                     num_val_iters = self.trainer_config.num_val_iters
                     if val_step >= num_val_iters:
@@ -56,7 +58,20 @@ class LDMTrainer:
                     val_batch = prep_batch(val_data)
                     with torch.no_grad():
                         val_loss = self.ldm.compute_loss(val_batch)
-                    print(f"Val loss: {val_loss.item()}")
+                    val_losses.append(val_loss.item())
+                print(f"Val loss: {sum(val_losses)/len(val_losses)}")
+
+                # Sampling during validation
+                for val_step, val_data in enumerate(self.val_loader):
+                    val_batch = prep_batch(val_data)
+                    with torch.no_grad():
+                        val_sample = self.ldm.sample(val_batch)
+                    print(f"Val sample: {val_sample.shape}")
+                    b, c, f, h, w = val_sample.shape
+                    for i in range(min(2, b)):
+                        import numpy as np
+                        Image.fromarray(((val_sample[i, :, 0, :, :] * 0.5 + 0.5) * 255).permute(1, 2, 0).numpy().astype(np.uint8)).save(f"step_{step}_sample_{i}.png")
+                    break
                 self.ldm.train()
 
             if step >= num_iters:

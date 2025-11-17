@@ -61,6 +61,23 @@ class LatentDiffusionModel(nn.Module):
 
         prediction = self.dit(x_t, t, conds)
         return prediction, noise
+    
+    def sample(self, batch):
+        batch = self.prep_data(batch)
+        x = batch["x"]
+        conds = {
+            "label": batch["label"]
+        }
+        x_t = torch.randn_like(x)
+
+        num_steps = 10
+        timesteps = torch.linspace(1., 0., num_steps + 1)
+        for i, t in enumerate(timesteps[:-1]):
+            t = torch.ones_like(batch["t"]) * t
+            velocity = self.dit(x_t, t, conds)
+            x_t = x_t + velocity * (timesteps[i+1] - timesteps[i])
+        return x_t
+
 
 
 if __name__ == "__main__":

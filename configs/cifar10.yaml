@@ -3,18 +3,18 @@ trainer:
   batch_size: 16
   num_workers: 2
   learning_rate: 1e-4
-  num_iters: 50
+  num_iters: 500
   val_every: 10
   num_val_iters: 5
 dit:
   in_channels: 3
-  num_channels: 32
-  depth: 8
-  num_heads: 4
+  num_channels: 384
+  depth: 12
+  num_heads: 6
   patch_size:
     - 1
-    - 1
-    - 1
+    - 2
+    - 2
   use_rope: true
   rope_ndim: 2
   mlp_ratio: 4.0
