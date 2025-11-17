@@ -3,7 +3,7 @@ trainer:
   batch_size: 16
   num_workers: 2
   learning_rate: 1e-4
-  num_iters: 15
+  num_iters: 50
   val_every: 10
   num_val_iters: 5
 dit:
@@ -15,6 +15,8 @@ dit:
     - 1
     - 1
     - 1
+  use_rope: true
+  rope_ndim: 2
   mlp_ratio: 4.0
   t_dim: 256
   num_classes: 10
