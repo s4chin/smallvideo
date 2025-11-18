@@ -61,7 +61,7 @@ class LatentDiffusionModel(nn.Module):
 
         prediction = self.dit(x_t, t, conds)
         return prediction, noise
-    
+
     def sample(self, batch):
         batch = self.prep_data(batch)
         x = batch["x"]
@@ -77,7 +77,6 @@ class LatentDiffusionModel(nn.Module):
             velocity = self.dit(x_t, t, conds)
             x_t = x_t + velocity * (timesteps[i+1] - timesteps[i])
         return x_t
-
 
 
 if __name__ == "__main__":
