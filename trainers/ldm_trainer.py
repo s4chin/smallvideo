@@ -8,6 +8,8 @@ import torchvision
 import torchvision.transforms as transforms
 from PIL import Image
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+from torch.distributed.fsdp import MixedPrecision
+import wandb
 
 from models import DiT, LatentDiffusionModel
 
@@ -39,7 +41,17 @@ def setup_fsdp(model, local_rank, world_size):
     if world_size == 1 or not torch.cuda.is_available():
         return model
 
-    return FSDP(model)
+    mixed_precision = MixedPrecision(
+        param_dtype=torch.bfloat16,
+        buffer_dtype=torch.bfloat16,
+        reduce_dtype=torch.float32,
+    )
+
+    return FSDP(
+        model,
+        mixed_precision=mixed_precision,
+        device_id=torch.device(f"cuda:{local_rank}"),
+    )
 
 
 class LDMTrainer:
@@ -118,6 +130,14 @@ class LDMTrainer:
             lr=self.trainer_config.learning_rate
         )
 
+        if self.rank == 0:
+            wandb.init(
+                entity="",
+                project="",
+                config=self.config,
+            )
+
+
     def train_cifar10(self, num_iters=None, val_every=None):
         num_iters = num_iters or self.trainer_config.num_iters
         val_every = val_every or self.trainer_config.val_every
@@ -146,7 +166,14 @@ class LDMTrainer:
                     with torch.no_grad():
                         val_loss = self.ldm.compute_loss(val_batch)
                     val_losses.append(val_loss.item())
-                print(f"Val loss: {sum(val_losses)/len(val_losses)}")
+                val_loss = sum(val_losses)/len(val_losses)
+                if self.world_size > 1 and dist.is_initialized():
+                    val_loss = torch.Tensor(val_loss, device="cpu")
+                    val_loss = dist.all_reduce(val_loss, op=dist.ReduceOp.AVG)
+                    val_loss = val_loss.item()
+                print(f"Val loss: {val_loss}")
+                if self.rank == 0:
+                    wandb.log({"val/loss": val_loss, "val/step": step})
 
                 # Sampling during validation
                 for val_data in self.val_loader:
@@ -155,12 +182,17 @@ class LDMTrainer:
                         val_sample = self.ldm.sample(val_batch)
                     print(f"Val sample: {val_sample.shape}")
                     b, c, f, h, w = val_sample.shape
+                    labels = val_batch["label"].clone().detach().cpu()
+                    wandb_images = []
                     for i in range(min(2, b)):
                         sample = val_sample[i, :, 0, :, :]
                         sample = (sample * 0.5 + 0.5) * 255
                         sample = sample.permute(1, 2, 0)
                         sample = sample.detach().cpu().numpy().astype(np.uint8)
-                        Image.fromarray(sample).save(f"step_{step}_sample_{i}.png")
+                        wandb_image = wandb.Image(sample, caption=f"Class {labels[i]}")
+                        wandb_images.append(wandb_image)
+                    if self.rank == 0:
+                        wandb.log({"val/images": wandb_images, "val/step": step})
                     break
                 self.ldm.train()
 
@@ -174,7 +206,13 @@ class LDMTrainer:
             loss = self.ldm.compute_loss(batch)
             loss.backward()
             self.optimizer.step()
+            if self.world_size > 1 and dist.is_initialized():
+                loss = loss.detach().cpu()
+                loss = dist.all_reduce(loss, op=dist.ReduceOp.AVG)
+                loss = loss.item()
             print(f"Train loss: {loss.item()}")
+            if self.rank == 0:
+                wandb.log({"train/loss": loss, "train/step": step})
 
         if dist.is_initialized():
             dist.destroy_process_group()

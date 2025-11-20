@@ -6,6 +6,9 @@ trainer:
   num_iters: 500
   val_every: 10
   num_val_iters: 5
+
+  wandb_entity: 
+  wandb_project: 
 dit:
   in_channels: 3
   num_channels: 384
