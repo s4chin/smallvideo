@@ -16,8 +16,15 @@ from models import DiT, LatentDiffusionModel
 transform = transforms.Compose([
     transforms.ToTensor(),
     transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5]),
-    transforms.RandomHorizontalFlip(0.5),
+    # transforms.RandomHorizontalFlip(0.5),
 ])
+
+
+def tensor_to_npimage(sample):
+    sample = (sample * 0.5 + 0.5) * 255
+    sample = sample.permute(1, 2, 0)
+    sample = sample.detach().cpu().numpy().astype(np.uint8)
+    return sample
 
 
 def setup_distributed():
@@ -25,7 +32,6 @@ def setup_distributed():
         rank = int(os.environ["RANK"])
         world_size = int(os.environ["WORLD_SIZE"])
         local_rank = int(os.environ["LOCAL_RANK"])
-
     else:
         rank = 0
         world_size = 1
@@ -68,6 +74,7 @@ class LDMTrainer:
             transform=transform,
             download=True,
         )
+        trainset = torch.utils.data.Subset(trainset, [0]*self.trainer_config.batch_size)  # sanity check: 1 sample
         valset = torchvision.datasets.CIFAR10(
             root="./data_cache",
             train=False,
@@ -94,7 +101,7 @@ class LDMTrainer:
             )
 
         train_loader_kwargs = {
-            "batch_size": 16,
+            "batch_size": self.trainer_config.batch_size,
             "num_workers": 2,
             "pin_memory": True,
         }
@@ -104,7 +111,7 @@ class LDMTrainer:
             train_loader_kwargs["shuffle"] = True
 
         val_loader_kwargs = {
-            "batch_size": 16,
+            "batch_size": self.trainer_config.batch_size,
             "num_workers": 2,
             "pin_memory": True,
         }
@@ -114,7 +121,7 @@ class LDMTrainer:
             val_loader_kwargs["shuffle"] = False
 
         self.train_loader = torch.utils.data.DataLoader(trainset, **train_loader_kwargs)
-        self.val_loader = torch.utils.data.DataLoader(valset, **val_loader_kwargs)
+        self.val_loader = torch.utils.data.DataLoader(trainset, **val_loader_kwargs)
 
         dit = DiT(**config.dit)
 
@@ -130,7 +137,9 @@ class LDMTrainer:
             lr=self.trainer_config.learning_rate
         )
 
-        if self.rank == 0:
+        self.use_wandb = config.trainer.use_wandb
+
+        if self.rank == 0 and self.use_wandb:
             wandb.init(
                 entity="",
                 project="",
@@ -154,7 +163,16 @@ class LDMTrainer:
         if self.train_sampler is not None:
             self.train_sampler.set_epoch(epoch)
 
-        for step, data in enumerate(self.train_loader):
+        def infinite_loader():
+            nonlocal epoch
+            while True:
+                for data in self.train_loader:
+                    yield data
+                epoch += 1
+                if self.train_sampler is not None:
+                    self.train_sampler.set_epoch(epoch)
+
+        for step, data in enumerate(infinite_loader()):
             if step > 0 and (step + 1) % val_every == 0:
                 self.ldm.eval()
                 val_losses = []
@@ -172,7 +190,7 @@ class LDMTrainer:
                     val_loss = dist.all_reduce(val_loss, op=dist.ReduceOp.AVG)
                     val_loss = val_loss.item()
                 print(f"Val loss: {val_loss}")
-                if self.rank == 0:
+                if self.rank == 0 and self.use_wandb:
                     wandb.log({"val/loss": val_loss, "val/step": step})
 
                 # Sampling during validation
@@ -186,12 +204,16 @@ class LDMTrainer:
                     wandb_images = []
                     for i in range(min(2, b)):
                         sample = val_sample[i, :, 0, :, :]
-                        sample = (sample * 0.5 + 0.5) * 255
-                        sample = sample.permute(1, 2, 0)
-                        sample = sample.detach().cpu().numpy().astype(np.uint8)
+                        sample = tensor_to_npimage(sample)
                         wandb_image = wandb.Image(sample, caption=f"Class {labels[i]}")
                         wandb_images.append(wandb_image)
-                    if self.rank == 0:
+                    for i in range(min(2, b)):
+                        print(val_batch["x"].shape)
+                        sample = val_batch["x"][i, :, 0, :, :]
+                        sample = tensor_to_npimage(sample)
+                        wandb_image = wandb.Image(sample, caption=f"Class {labels[i]}")
+                        wandb_images.append(wandb_image)
+                    if self.rank == 0 and self.use_wandb:
                         wandb.log({"val/images": wandb_images, "val/step": step})
                     break
                 self.ldm.train()
@@ -210,8 +232,8 @@ class LDMTrainer:
                 loss = loss.detach().cpu()
                 loss = dist.all_reduce(loss, op=dist.ReduceOp.AVG)
                 loss = loss.item()
-            print(f"Train loss: {loss.item()}")
-            if self.rank == 0:
+            print(f"Train loss: {loss.item()}, Step: {step}")
+            if self.rank == 0 and self.use_wandb:
                 wandb.log({"train/loss": loss, "train/step": step})
 
         if dist.is_initialized():
