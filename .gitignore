@@ -63,4 +63,4 @@ htmlcov/
 .dmypy.json
 dmypy.json
 
-*.png
+wandb/

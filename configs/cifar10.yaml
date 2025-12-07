@@ -1,12 +1,13 @@
 trainer:
   target: trainers.ldm_trainer.LDMTrainer
-  batch_size: 16
+  batch_size: 512
   num_workers: 2
-  learning_rate: 1e-4
-  num_iters: 500
-  val_every: 10
+  learning_rate: 1e-5
+  num_iters: 5000
+  val_every: 100
   num_val_iters: 5
 
+  use_wandb: true
   wandb_entity: 
   wandb_project: 
 dit:

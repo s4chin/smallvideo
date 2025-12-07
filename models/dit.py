@@ -9,7 +9,6 @@ except ImportError:
     FLASH_ATTN_AVAILABLE = False
 
 
-
 def scale_shift(x, scale=None, shift=None):
     bs, seq_len, num_channels = x.shape
     device = x.device
@@ -126,7 +125,7 @@ class RopeEmbedding(nn.Module):
         self.ndim = ndim
         assert self.head_dim % (2 * self.ndim) == 0
 
-    def calculate_rope_embeddings(self, positions):
+    def calculate_rope_embeddings(self, positions, device = "cpu"):
         # positions is a list of len at least self.ndim
         # if greater len than self.ndim, we will use last self.ndim positions to calculate rope embs
         assert len(positions) >= self.ndim
@@ -142,7 +141,7 @@ class RopeEmbedding(nn.Module):
         inv_freqs = 1./(10000 ** (i / freq_dim))
         thetas = torch.outer(pos, inv_freqs)
 
-        combined_thetas = torch.zeros(seq_len, self.head_dim // 2)
+        combined_thetas = torch.zeros(seq_len, self.head_dim // 2, device=device)
         for ix, pos in enumerate(positions[-self.ndim:]):
             pos_thetas = thetas[pos]
             combined_thetas[:, ix * freq_dim: (ix+1) * freq_dim] = pos_thetas
@@ -299,6 +298,8 @@ class DiT(nn.Module):
         # x [bs, c, f, h, w]
         # conds will contain condition like t, label, etc.
 
+        device = x.device
+
         b, c, f, h, w = x.shape
         fhw = [f, h, w]
 
@@ -307,13 +308,13 @@ class DiT(nn.Module):
             # Assumption: labels are shifted by 1 such that label 0 represents unconditional  # noqa: E501
             label = conds.get("label") if "label" in conds else torch.zeros(b, 1)
             label_embedding = self.label_embedder(label).squeeze(1)
-            conditional_embedding += label_embedding
+            conditional_embedding = conditional_embedding + label_embedding
 
         x = self.patchify(x, fhw) # shape [bs, seq_len, num_channels]
 
         patch_positions = self.get_patch_positions(fhw)
         if self.use_rope:
-            rope_embs = self.rope.calculate_rope_embeddings(patch_positions)
+            rope_embs = self.rope.calculate_rope_embeddings(patch_positions, device=device)
         else:
             rope_embs = None
 
