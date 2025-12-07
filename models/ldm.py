@@ -24,8 +24,6 @@ class LatentDiffusionModel(nn.Module):
         self.dit = dit
         self.vae = vae
 
-        self.cached_noise = None
-
 
     def prep_data(self, batch, p_drop_cond=0.):
         # timestep sample, vae encode/decode, etc.
@@ -58,10 +56,7 @@ class LatentDiffusionModel(nn.Module):
             "label": batch["label"]
         }
 
-        if self.cached_noise is None:
-            self.cached_noise = torch.randn_like(x[:1]).repeat(x.shape[0], 1, 1, 1, 1)
-        # noise = torch.randn_like(x)
-        noise = self.cached_noise.detach().clone()
+        noise = torch.randn_like(x)
         x_t = self.scheduler.add_noise(x, t, noise)
 
         prediction = self.dit(x_t, t, conds)
@@ -73,8 +68,7 @@ class LatentDiffusionModel(nn.Module):
         conds = {
             "label": batch["label"]
         }
-        # x_t = torch.randn_like(x)
-        x_t = self.cached_noise.detach().clone()[:x.shape[0]]
+        x_t = torch.randn_like(x)
 
         num_steps = 10
         timesteps = torch.linspace(0., 1., num_steps + 1)

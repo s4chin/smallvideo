@@ -28,7 +28,7 @@ def sincos_embedding_1d(t, half_dim):
     if t.ndim == 1:
         t = t.unsqueeze(1) # [b, 1]
     b = t.shape[0]
-    freqs = (10000 ** ((2. * torch.arange(0, half_dim)) / (2 * half_dim)))
+    freqs = (10000 ** ((2. * torch.arange(0, half_dim, device=t.device)) / (2 * half_dim)))
     pe_sin = torch.sin(t / freqs)
     pe_cos = torch.cos(t / freqs)
 

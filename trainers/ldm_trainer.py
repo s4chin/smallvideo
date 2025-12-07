@@ -16,7 +16,7 @@ from models import DiT, LatentDiffusionModel
 transform = transforms.Compose([
     transforms.ToTensor(),
     transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5]),
-    # transforms.RandomHorizontalFlip(0.5),
+    transforms.RandomHorizontalFlip(0.5),
 ])
 
 
@@ -74,7 +74,6 @@ class LDMTrainer:
             transform=transform,
             download=True,
         )
-        trainset = torch.utils.data.Subset(trainset, [0]*self.trainer_config.batch_size)  # sanity check: 1 sample
         valset = torchvision.datasets.CIFAR10(
             root="./data_cache",
             train=False,
@@ -121,7 +120,7 @@ class LDMTrainer:
             val_loader_kwargs["shuffle"] = False
 
         self.train_loader = torch.utils.data.DataLoader(trainset, **train_loader_kwargs)
-        self.val_loader = torch.utils.data.DataLoader(trainset, **val_loader_kwargs)
+        self.val_loader = torch.utils.data.DataLoader(valset, **val_loader_kwargs)
 
         dit = DiT(**config.dit)
 
