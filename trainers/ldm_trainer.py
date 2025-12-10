@@ -7,8 +7,8 @@ import torch.optim as optim
 import torchvision
 import torchvision.transforms as transforms
 from PIL import Image
-from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-from torch.distributed.fsdp import MixedPrecision
+from torch.distributed.fsdp import fully_shard
+from torch.distributed.device_mesh import init_device_mesh
 import wandb
 
 from models import DiT, LatentDiffusionModel
@@ -37,6 +37,9 @@ def setup_distributed():
         world_size = 1
         local_rank = 0
 
+    if torch.cuda.is_available():
+        torch.cuda.set_device(local_rank)
+
     if not dist.is_initialized() and world_size > 1:
         dist.init_process_group(backend="nccl", world_size=world_size, rank=rank)
 
@@ -47,17 +50,11 @@ def setup_fsdp(model, local_rank, world_size):
     if world_size == 1 or not torch.cuda.is_available():
         return model
 
-    mixed_precision = MixedPrecision(
-        param_dtype=torch.bfloat16,
-        buffer_dtype=torch.bfloat16,
-        reduce_dtype=torch.float32,
-    )
-
-    return FSDP(
-        model,
-        mixed_precision=mixed_precision,
-        device_id=torch.device(f"cuda:{local_rank}"),
-    )
+    mesh = init_device_mesh("cuda", (world_size,))
+    for layer in model.dit.dit_blocks:
+        fully_shard(layer, mesh=mesh)
+    fully_shard(model.dit, mesh=mesh)
+    return model
 
 
 class LDMTrainer:
@@ -228,10 +225,9 @@ class LDMTrainer:
             loss.backward()
             self.optimizer.step()
             if self.world_size > 1 and dist.is_initialized():
-                loss = loss.detach().cpu()
-                loss = dist.all_reduce(loss, op=dist.ReduceOp.AVG)
-                loss = loss.item()
-            print(f"Train loss: {loss.item()}, Step: {step}")
+                print(f"Loss: {loss}, {type(loss)=}, {loss.device=}")
+                dist.all_reduce(loss, op=dist.ReduceOp.AVG)
+            print(f"[RANK {self.rank}]: Train loss: {loss.item()}, Step: {step}")
             if self.rank == 0 and self.use_wandb:
                 wandb.log({"train/loss": loss, "train/step": step})
 
