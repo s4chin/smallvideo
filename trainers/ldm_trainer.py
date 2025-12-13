@@ -13,11 +13,13 @@ import wandb
 
 from models import DiT, LatentDiffusionModel
 
-transform = transforms.Compose([
-    transforms.ToTensor(),
-    transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5]),
-    transforms.RandomHorizontalFlip(0.5),
-])
+transform = transforms.Compose(
+    [
+        transforms.ToTensor(),
+        transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5]),
+        transforms.RandomHorizontalFlip(0.5),
+    ]
+)
 
 
 def tensor_to_npimage(sample):
@@ -128,10 +130,7 @@ class LDMTrainer:
         self.ldm.to(self.device)
         self.ldm = setup_fsdp(self.ldm, self.local_rank, self.world_size)
 
-        self.optimizer = optim.AdamW(
-            self.ldm.parameters(),
-            lr=self.trainer_config.learning_rate
-        )
+        self.optimizer = optim.AdamW(self.ldm.parameters(), lr=self.trainer_config.learning_rate)
 
         self.use_wandb = config.trainer.use_wandb
 
@@ -142,8 +141,7 @@ class LDMTrainer:
                 config=self.config,
             )
 
-
-    def train_cifar10(self, num_iters=None, val_every=None):
+    def train_cifar10(self, num_iters: int | None = None, val_every: int | None = None) -> None:
         num_iters = num_iters or self.trainer_config.num_iters
         val_every = val_every or self.trainer_config.val_every
 
@@ -179,12 +177,11 @@ class LDMTrainer:
                     val_batch = prep_batch(val_data)
                     with torch.no_grad():
                         val_loss = self.ldm.compute_loss(val_batch)
-                    val_losses.append(val_loss.item())
-                val_loss = sum(val_losses)/len(val_losses)
-                if self.world_size > 1 and dist.is_initialized():
-                    val_loss = torch.Tensor(val_loss, device="cpu")
-                    val_loss = dist.all_reduce(val_loss, op=dist.ReduceOp.AVG)
-                    val_loss = val_loss.item()
+                        print(f"[RANK {self.local_rank}]: val loss - {val_loss.item()}")
+                    if self.world_size > 1 and dist.is_initialized():
+                        dist.all_reduce(val_loss, op=dist.ReduceOp.AVG)
+                        val_losses.append(val_loss.item())
+                val_loss = sum(val_losses) / len(val_losses)
                 print(f"Val loss: {val_loss}")
                 if self.rank == 0 and self.use_wandb:
                     wandb.log({"val/loss": val_loss, "val/step": step})
@@ -195,7 +192,7 @@ class LDMTrainer:
                     with torch.no_grad():
                         val_sample = self.ldm.sample(val_batch)
                     print(f"Val sample: {val_sample.shape}")
-                    b, c, f, h, w = val_sample.shape
+                    b, c, f, h, w = val_sample.shape  # pyright: ignore[reportUnusedVariable]
                     labels = val_batch["label"].clone().detach().cpu()
                     wandb_images = []
                     for i in range(min(2, b)):
@@ -237,6 +234,7 @@ class LDMTrainer:
 
 if __name__ == "__main__":
     from omegaconf import OmegaConf
+
     config = OmegaConf.load("configs/cifar10.yaml")
     trainer = LDMTrainer(config)
     trainer.train_cifar10(num_iters=100)
