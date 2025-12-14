@@ -1,6 +1,7 @@
 import os
 
 import numpy as np
+import omegaconf
 import torch
 import torch.distributed as dist
 import torch.optim as optim
@@ -9,6 +10,7 @@ import torchvision.transforms as transforms
 from PIL import Image
 from torch.distributed.fsdp import fully_shard
 from torch.distributed.device_mesh import init_device_mesh
+import torch.distributed.checkpoint as dcp
 import wandb
 
 from models import DiT, LatentDiffusionModel
@@ -22,14 +24,14 @@ transform = transforms.Compose(
 )
 
 
-def tensor_to_npimage(sample):
+def tensor_to_npimage(sample: torch.Tensor) -> np.ndarray:
     sample = (sample * 0.5 + 0.5) * 255
     sample = sample.permute(1, 2, 0)
     sample = sample.detach().cpu().numpy().astype(np.uint8)
     return sample
 
 
-def setup_distributed():
+def setup_distributed() -> tuple[int, int, int]:
     if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
         rank = int(os.environ["RANK"])
         world_size = int(os.environ["WORLD_SIZE"])
@@ -60,7 +62,7 @@ def setup_fsdp(model, local_rank, world_size):
 
 
 class LDMTrainer:
-    def __init__(self, config):
+    def __init__(self, config) -> None:
         # dataloader, scheduler, dit setup
         self.config = config
         self.trainer_config = self.config.trainer
@@ -132,6 +134,20 @@ class LDMTrainer:
 
         self.optimizer = optim.AdamW(self.ldm.parameters(), lr=self.trainer_config.learning_rate)
 
+        self.start_step = 0
+        if hasattr(self.trainer_config, "ckpt_path") and self.trainer_config.ckpt_path:
+            print("+" * 100)
+            dcp.load(
+                state_dict={
+                    "ldm": self.ldm.state_dict(),
+                    "optimizer": self.optimizer.state_dict(),
+                },
+                checkpoint_id=self.trainer_config.ckpt_path,
+            )
+            if os.path.isfile(f"{self.trainer_config.ckpt_path}.meta"):
+                metadata = torch.load(f"{self.trainer_config.ckpt_path}.meta")
+                self.start_step = metadata["step"]
+
         self.use_wandb = config.trainer.use_wandb
 
         if self.rank == 0 and self.use_wandb:
@@ -144,6 +160,7 @@ class LDMTrainer:
     def train_cifar10(self, num_iters: int | None = None, val_every: int | None = None) -> None:
         num_iters = num_iters or self.trainer_config.num_iters
         val_every = val_every or self.trainer_config.val_every
+        save_every = self.trainer_config.save_every
 
         def prep_batch(data):
             images, labels = data
@@ -166,8 +183,19 @@ class LDMTrainer:
                 if self.train_sampler is not None:
                     self.train_sampler.set_epoch(epoch)
 
-        for step, data in enumerate(infinite_loader()):
-            if step > 0 and (step + 1) % val_every == 0:
+        for step, data in enumerate(infinite_loader(), start=self.start_step):
+            if step > 0 and step % save_every == 0:
+                save_path = "checkpoints"
+                os.makedirs(save_path, exist_ok=True)
+                state_dict = {
+                    "ldm": self.ldm.state_dict(),
+                    "optimizer": self.optimizer.state_dict(),
+                }
+                dcp.save(state_dict, checkpoint_id=f"{save_path}/{step}")
+                if self.rank == 0:
+                    torch.save({"step": step}, f"{save_path}/{step}.meta")
+
+            if step > 0 and step % val_every == 0:
                 self.ldm.eval()
                 val_losses = []
                 for val_step, val_data in enumerate(self.val_loader):
@@ -184,7 +212,7 @@ class LDMTrainer:
                 val_loss = sum(val_losses) / len(val_losses)
                 print(f"Val loss: {val_loss}")
                 if self.rank == 0 and self.use_wandb:
-                    wandb.log({"val/loss": val_loss, "val/step": step})
+                    wandb.log({"val/loss": val_loss}, step=step)
 
                 # Sampling during validation
                 for val_data in self.val_loader:
@@ -207,7 +235,7 @@ class LDMTrainer:
                         wandb_image = wandb.Image(sample, caption=f"Class {labels[i]}")
                         wandb_images.append(wandb_image)
                     if self.rank == 0 and self.use_wandb:
-                        wandb.log({"val/images": wandb_images, "val/step": step})
+                        wandb.log({"val/images": wandb_images}, step=step)
                     break
                 self.ldm.train()
 
@@ -226,7 +254,7 @@ class LDMTrainer:
                 dist.all_reduce(loss, op=dist.ReduceOp.AVG)
             print(f"[RANK {self.rank}]: Train loss: {loss.item()}, Step: {step}")
             if self.rank == 0 and self.use_wandb:
-                wandb.log({"train/loss": loss, "train/step": step})
+                wandb.log({"train/loss": loss, "train/step": step}, step=step)
 
         if dist.is_initialized():
             dist.destroy_process_group()
