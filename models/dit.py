@@ -3,10 +3,14 @@ import torch.nn as nn
 from einops import rearrange
 
 try:
-    from flash_attn import flash_attn_func
+    from flash_attn_interface import flash_attn_func
+
     FLASH_ATTN_AVAILABLE = True
 except ImportError:
     FLASH_ATTN_AVAILABLE = False
+
+print("+" * 100)
+print(f"{FLASH_ATTN_AVAILABLE=}")
 
 
 def scale_shift(x, scale=None, shift=None):
@@ -26,9 +30,9 @@ def sincos_embedding_1d(t, half_dim):
     #          PE_(pos,2i+1) = cos(pos/10000^(2i/d_model))
     # where i goes from 0 to half_dim-1
     if t.ndim == 1:
-        t = t.unsqueeze(1) # [b, 1]
+        t = t.unsqueeze(1)  # [b, 1]
     b = t.shape[0]
-    freqs = (10000 ** ((2. * torch.arange(0, half_dim, device=t.device)) / (2 * half_dim)))
+    freqs = 10000 ** ((2.0 * torch.arange(0, half_dim, device=t.device)) / (2 * half_dim))
     pe_sin = torch.sin(t / freqs)
     pe_cos = torch.cos(t / freqs)
 
@@ -114,7 +118,16 @@ class UnPatchify(nn.Module):
         nf, nh, nw = f // self.pf, h // self.ph, w // self.pw
 
         x = self.linear(x)
-        x = rearrange(x, "b (nf nh nw) (c pf ph pw) -> b c (nf pf) (nh ph) (nw pw)", nf=nf, nh=nh, nw=nw, pf=self.pf, ph=self.ph, pw=self.pw)
+        x = rearrange(
+            x,
+            "b (nf nh nw) (c pf ph pw) -> b c (nf pf) (nh ph) (nw pw)",
+            nf=nf,
+            nh=nh,
+            nw=nw,
+            pf=self.pf,
+            ph=self.ph,
+            pw=self.pw,
+        )
         return x
 
 
@@ -125,7 +138,7 @@ class RopeEmbedding(nn.Module):
         self.ndim = ndim
         assert self.head_dim % (2 * self.ndim) == 0
 
-    def calculate_rope_embeddings(self, positions, device = "cpu"):
+    def calculate_rope_embeddings(self, positions, device="cpu"):
         # positions is a list of len at least self.ndim
         # if greater len than self.ndim, we will use last self.ndim positions to calculate rope embs
         assert len(positions) >= self.ndim
@@ -138,13 +151,13 @@ class RopeEmbedding(nn.Module):
             max_position = max(max_position, torch.max(pos))
         pos = torch.arange(int(1 + max_position))
         i = torch.arange(freq_dim)
-        inv_freqs = 1./(10000 ** (i / freq_dim))
+        inv_freqs = 1.0 / (10000 ** (i / freq_dim))
         thetas = torch.outer(pos, inv_freqs)
 
         combined_thetas = torch.zeros(seq_len, self.head_dim // 2, device=device)
-        for ix, pos in enumerate(positions[-self.ndim:]):
+        for ix, pos in enumerate(positions[-self.ndim :]):
             pos_thetas = thetas[pos]
-            combined_thetas[:, ix * freq_dim: (ix+1) * freq_dim] = pos_thetas
+            combined_thetas[:, ix * freq_dim : (ix + 1) * freq_dim] = pos_thetas
 
         return combined_thetas.cos(), combined_thetas.sin()
 
@@ -170,12 +183,18 @@ class MHSA(nn.Module):
             v = rearrange(v, "bs seq_len (n_head head_dim) -> bs seq_len n_head head_dim", n_head=self.num_heads)
 
             head_dim = num_channels // self.num_heads
-            softmax_scale = 1.0 / (head_dim ** 0.5)
+            softmax_scale = 1.0 / (head_dim**0.5)
 
             if rope is not None:
                 q = apply_rope_embs(q, rope)
                 k = apply_rope_embs(k, rope)
-            attn_out = flash_attn_func(q, k, v, dropout_p=0.0, softmax_scale=softmax_scale, causal=False)
+            attn_out = flash_attn_func(
+                q.to(torch.bfloat16),
+                k.to(torch.bfloat16),
+                v.to(torch.bfloat16),
+                softmax_scale=softmax_scale,
+                causal=False,
+            ).to(x.dtype)
 
             attn_out = rearrange(attn_out, "bs seq_len n_head head_dim -> bs seq_len (n_head head_dim)")
         else:
@@ -223,8 +242,7 @@ class DiTBlock(nn.Module):
         mlp_channels = int(num_channels * mlp_ratio)
         self.mlp = Mlp(num_channels, mlp_channels)
 
-        self.adaLN_mlp = nn.Linear(num_channels, 6 * num_channels) # can make it more complex
-
+        self.adaLN_mlp = nn.Linear(num_channels, 6 * num_channels)  # can make it more complex
 
     def forward(self, x, cond, rope=None):
         # shapes
@@ -267,12 +285,10 @@ class DiT(nn.Module):
         num_heads,
         patch_size,
         use_rope=True,
-        rope_ndim = None,
-
-        mlp_ratio = 4.0,
-
-        t_dim = 256,
-        num_classes = 0
+        rope_ndim=None,
+        mlp_ratio=4.0,
+        t_dim=256,
+        num_classes=0,
     ):
         super().__init__()
 
@@ -310,7 +326,7 @@ class DiT(nn.Module):
             label_embedding = self.label_embedder(label).squeeze(1)
             conditional_embedding = conditional_embedding + label_embedding
 
-        x = self.patchify(x, fhw) # shape [bs, seq_len, num_channels]
+        x = self.patchify(x, fhw)  # shape [bs, seq_len, num_channels]
 
         patch_positions = self.get_patch_positions(fhw)
         if self.use_rope:
@@ -330,7 +346,7 @@ class DiT(nn.Module):
         pf, ph, pw = self.patch_size[0], self.patch_size[1], self.patch_size[2]
         nf, nh, nw = f // pf, h // ph, w // pw
         pos_f, pos_h, pos_w = torch.arange(nf), torch.arange(nh), torch.arange(nw)
-        pos_f, pos_h, pos_w = torch.meshgrid(pos_f, pos_h, pos_w, indexing = 'ij')
+        pos_f, pos_h, pos_w = torch.meshgrid(pos_f, pos_h, pos_w, indexing="ij")
         return [pos_f.flatten(), pos_h.flatten(), pos_w.flatten()]
 
 
@@ -372,12 +388,11 @@ def test_dit_block(bs, seq_len, num_channels, num_heads):
 def test_dit(bs, c, f, h, w, num_channels, depth, num_heads, num_classes=10, patch_size=(1, 2, 2)):
     dit = DiT(c, num_channels, depth, num_heads, patch_size, num_classes=num_classes)
     x = torch.randn(bs, c, f, h, w)
-    conds = {
-        "label": torch.zeros(bs, 1, dtype=torch.long)
-    }
+    conds = {"label": torch.zeros(bs, 1, dtype=torch.long)}
     t = torch.zeros(bs, 1)
     out = dit(x, t, conds)
     assert out.shape == x.shape, f"Output shape {out.shape} does not match input shape {x.shape}"
+
 
 def test_rope_embeddings():
     rope = RopeEmbedding(24, 2)
@@ -387,7 +402,7 @@ def test_rope_embeddings():
     cos, sin = rope.calculate_rope_embeddings(positions)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     test_sincos_embedding_1d()
 
     bs, c, f, h, w = 3, 16, 8, 32, 32
