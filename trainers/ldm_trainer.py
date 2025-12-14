@@ -1,7 +1,6 @@
 import os
 
 import numpy as np
-import omegaconf
 import torch
 import torch.distributed as dist
 import torch.optim as optim
@@ -12,6 +11,7 @@ from torch.distributed.fsdp import fully_shard
 from torch.distributed.device_mesh import init_device_mesh
 import torch.distributed.checkpoint as dcp
 import wandb
+import importlib
 
 from models import DiT, LatentDiffusionModel
 
@@ -69,18 +69,12 @@ class LDMTrainer:
 
         self.local_rank, self.rank, self.world_size = setup_distributed()
 
-        trainset = torchvision.datasets.CIFAR10(
-            root="./data_cache",
-            train=True,
-            transform=transform,
-            download=True,
-        )
-        valset = torchvision.datasets.CIFAR10(
-            root="./data_cache",
-            train=False,
-            transform=transform,
-            download=True,
-        )
+        module_path, class_name = self.config.data.target.rsplit(".", 1)
+        dataset_class = getattr(importlib.import_module(module_path), class_name)
+        dataset = dataset_class(self.config.data)
+
+        trainset = dataset.get_trainset(transform)
+        valset = dataset.get_valset(transform)
 
         self.train_sampler = None
         self.val_sampler = None
@@ -104,6 +98,7 @@ class LDMTrainer:
             "batch_size": self.trainer_config.batch_size,
             "num_workers": 2,
             "pin_memory": True,
+            "multiprocessing_context": "spawn",
         }
         if self.train_sampler is not None:
             train_loader_kwargs["sampler"] = self.train_sampler
@@ -114,6 +109,7 @@ class LDMTrainer:
             "batch_size": self.trainer_config.batch_size,
             "num_workers": 2,
             "pin_memory": True,
+            "multiprocessing_context": "spawn",
         }
         if self.val_sampler is not None:
             val_loader_kwargs["sampler"] = self.val_sampler
