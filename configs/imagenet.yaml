@@ -1,0 +1,31 @@
+trainer:
+  target: trainers.ldm_trainer.LDMTrainer
+  ckpt_path: null
+  batch_size: 512
+  num_workers: 2
+  learning_rate: 1e-5
+  num_iters: 5000
+  val_every: 100
+  num_val_iters: 5
+
+  save_every: 10000
+
+  use_wandb: false
+  wandb_entity:
+  wandb_project:
+data:
+  target: data.ImageNet
+dit:
+  in_channels: 4
+  num_channels: 384
+  depth: 12
+  num_heads: 6
+  patch_size:
+    - 1
+    - 2
+    - 2
+  use_rope: true
+  rope_ndim: 2
+  mlp_ratio: 4.0
+  t_dim: 256
+  num_classes: 1000
