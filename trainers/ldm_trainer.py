@@ -213,7 +213,7 @@ class LDMTrainer:
                 for val_data in self.val_loader:
                     val_batch = prep_batch(val_data)
                     with torch.no_grad():
-                        val_sample = self.ldm.sample(val_batch)
+                        val_sample = self.ldm.sample(val_batch, cfg_scale=3.0)
                     print(f"Val sample: {val_sample.shape}")
                     b, c, f, h, w = val_sample.shape  # pyright: ignore[reportUnusedVariable]
                     labels = val_batch["label"].clone().detach().cpu()

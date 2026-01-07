@@ -62,7 +62,7 @@ class LatentDiffusionModel(nn.Module):
         prediction = self.dit(x_t, t, conds)
         return prediction, noise
 
-    def sample(self, batch):
+    def sample(self, batch, cfg_scale = 1.0):
         batch = self.prep_data(batch)
         x = batch["x"]
         conds = {
@@ -70,11 +70,24 @@ class LatentDiffusionModel(nn.Module):
         }
         x_t = torch.randn_like(x)
 
+        if cfg_scale != 1.0:
+            conds = {
+                "label": torch.cat([conds["label"], conds["label"]], dim=0)
+            }
+
         num_steps = 10
         timesteps = torch.linspace(0., 1., num_steps + 1)
         for i, t in enumerate(timesteps[:-1]):
-            t = torch.ones_like(batch["t"]) * t
-            velocity = self.dit(x_t, t, conds)
+            if cfg_scale != 1.0:
+                x_t_input = torch.cat([x_t, x_t], dim=0)
+                t_in = torch.full((x_t_input.shape[0],), t, device=x_t.device)
+                velocity = self.dit(x_t_input, t_in, conds)
+                velocity_c, velocity_uc = velocity.chunk(2, dim=0)
+                velocity = velocity_c + cfg_scale * (velocity_uc - velocity_c)
+            else:
+                t_in = torch.full((x_t.shape[0],), t, device=x_t.device)
+                velocity = self.dit(x_t, t_in, conds)
+
             x_t = x_t + velocity * (timesteps[i+1] - timesteps[i])
         return x_t
 
