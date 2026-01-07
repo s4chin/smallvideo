@@ -203,7 +203,7 @@ class LDMTrainer:
                         print(f"[RANK {self.local_rank}]: val loss - {val_loss.item()}")
                     if self.world_size > 1 and dist.is_initialized():
                         dist.all_reduce(val_loss, op=dist.ReduceOp.AVG)
-                        val_losses.append(val_loss.item())
+                    val_losses.append(val_loss.item())
                 val_loss = sum(val_losses) / len(val_losses)
                 print(f"Val loss: {val_loss}")
                 if self.rank == 0 and self.use_wandb:
