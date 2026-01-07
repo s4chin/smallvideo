@@ -1,7 +1,7 @@
-from omegaconf import OmegaConf
 import argparse
 import importlib
 
+from omegaconf import OmegaConf
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -13,4 +13,4 @@ if __name__ == "__main__":
     module_path, class_name = trainer_config.target.rsplit(".", 1)
     trainer_class = getattr(importlib.import_module(module_path), class_name)
     trainer = trainer_class(config)
-    trainer.train() if hasattr(trainer, "train") else trainer.train_cifar10()
+    trainer.train()

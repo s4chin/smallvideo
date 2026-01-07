@@ -1,18 +1,17 @@
+import importlib
 import os
 
 import numpy as np
 import torch
 import torch.distributed as dist
+import torch.distributed.checkpoint as dcp
 import torch.optim as optim
-import torchvision
 import torchvision.transforms as transforms
 from PIL import Image
-from torch.distributed.fsdp import fully_shard
 from torch.distributed.device_mesh import init_device_mesh
-import torch.distributed.checkpoint as dcp
-import wandb
-import importlib
+from torch.distributed.fsdp import fully_shard
 
+import wandb
 from models import DiT, LatentDiffusionModel
 
 transform = transforms.Compose(
@@ -107,7 +106,7 @@ class LDMTrainer:
 
         val_loader_kwargs = {
             "batch_size": self.trainer_config.batch_size,
-            "num_workers": 2,
+            "num_workers": self.trainer_config.num_workers,
             "pin_memory": True,
             "multiprocessing_context": "spawn",
         }
@@ -148,12 +147,12 @@ class LDMTrainer:
 
         if self.rank == 0 and self.use_wandb:
             wandb.init(
-                entity="",
-                project="",
+                entity=self.trainer_config.wandb_entity,
+                project=self.trainer_config.wandb_project,
                 config=self.config,
             )
 
-    def train_cifar10(self, num_iters: int | None = None, val_every: int | None = None) -> None:
+    def train(self, num_iters: int | None = None, val_every: int | None = None) -> None:
         num_iters = num_iters or self.trainer_config.num_iters
         val_every = val_every or self.trainer_config.val_every
         save_every = self.trainer_config.save_every
@@ -246,11 +245,11 @@ class LDMTrainer:
             loss.backward()
             self.optimizer.step()
             if self.world_size > 1 and dist.is_initialized():
-                print(f"Loss: {loss}, {type(loss)=}, {loss.device=}")
                 dist.all_reduce(loss, op=dist.ReduceOp.AVG)
-            print(f"[RANK {self.rank}]: Train loss: {loss.item()}, Step: {step}")
             if self.rank == 0 and self.use_wandb:
                 wandb.log({"train/loss": loss, "train/step": step}, step=step)
+            if self.rank == 0:
+                print(f"Train loss: {loss.item()}, Step: {step}")
 
         if dist.is_initialized():
             dist.destroy_process_group()
@@ -261,4 +260,4 @@ if __name__ == "__main__":
 
     config = OmegaConf.load("configs/cifar10.yaml")
     trainer = LDMTrainer(config)
-    trainer.train_cifar10(num_iters=100)
+    trainer.train(num_iters=100)

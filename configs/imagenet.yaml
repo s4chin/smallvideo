@@ -1,7 +1,7 @@
 trainer:
   target: trainers.ldm_trainer.LDMTrainer
   ckpt_path: null
-  batch_size: 512
+  batch_size: 768
   num_workers: 2
   learning_rate: 1e-5
   num_iters: 5000
