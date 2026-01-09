@@ -14,6 +14,10 @@ from torch.distributed.fsdp import fully_shard
 import wandb
 from models import DiT, LatentDiffusionModel
 
+
+from diffusers.models import AutoencoderKL
+from diffusers.image_processor import VaeImageProcessor
+
 transform = transforms.Compose(
     [
         transforms.ToTensor(),
@@ -120,7 +124,12 @@ class LDMTrainer:
 
         dit = DiT(**config.dit)
 
-        self.ldm = LatentDiffusionModel(dit, vae=None)
+        if config.vae:
+            self.vae = AutoencoderKL.from_pretrained(config.vae.model_name)
+        else:
+            self.vae = None
+
+        self.ldm = LatentDiffusionModel(dit, vae=self.vae)
 
         self.device = f"cuda:{self.local_rank}" if torch.cuda.is_available() else "cpu"
 
@@ -220,12 +229,14 @@ class LDMTrainer:
                     wandb_images = []
                     for i in range(min(2, b)):
                         sample = val_sample[i, :, 0, :, :]
+                        sample = self.vae_decode_single_image(sample)
                         sample = tensor_to_npimage(sample)
                         wandb_image = wandb.Image(sample, caption=f"Class {labels[i]}")
                         wandb_images.append(wandb_image)
                     for i in range(min(2, b)):
                         print(val_batch["x"].shape)
                         sample = val_batch["x"][i, :, 0, :, :]
+                        sample = self.vae_decode_single_image(sample)
                         sample = tensor_to_npimage(sample)
                         wandb_image = wandb.Image(sample, caption=f"Class {labels[i]}")
                         wandb_images.append(wandb_image)
@@ -253,6 +264,15 @@ class LDMTrainer:
 
         if dist.is_initialized():
             dist.destroy_process_group()
+
+    def vae_decode_single_image(self, sample):
+        assert hasattr(self, "vae")
+        assert self.vae is not None
+
+        # sample has shape [c, h, w], we need [b, c, h, w]
+        sample = sample.unsqueeze(0)
+        sample = self.vae.decode(sample.cuda() * 12.0).sample[0, :, :, :]
+        return sample
 
 
 if __name__ == "__main__":

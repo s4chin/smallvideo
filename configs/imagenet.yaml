@@ -4,13 +4,13 @@ trainer:
   batch_size: 768
   num_workers: 2
   learning_rate: 1e-5
-  num_iters: 5000
-  val_every: 100
-  num_val_iters: 5
+  num_iters: 5000000
+  val_every: 1000
+  num_val_iters: 50
 
   save_every: 10000
 
-  use_wandb: false
+  use_wandb: true
   wandb_entity:
   wandb_project:
 data:
@@ -29,3 +29,6 @@ dit:
   mlp_ratio: 4.0
   t_dim: 256
   num_classes: 1000
+vae:
+  model_name: "stabilityai/sdxl-vae"
+  decoder_only: true # not wired up yet
